@@ -227,3 +227,5 @@ ragent/
 **In scope**: Core agent loop, tool system, Ollama backend, CLI, API server, ZED integration, controlled web access, code-writing skill, multi-agent orchestration
 
 **Out of scope (for now)**: GUI/Web UI, TUI (ratatui), MCP server implementation, voice interface, persistent memory/RAG (vector DB), image/multimodal support
+
+Persistent memory example can be found here [mempalace](https://github.com/milla-jovovich/mempalace) pretty useful although implemented in Python
