@@ -10,25 +10,25 @@ Build a local-only agentic framework in Rust ("ragent") that runs your own LLM (
   ZED / VSCode / CLI / Web UI
          │
          ▼
-  ┌─────────────────────┐
+  ┌──────────────────────┐
   │   ragent API Server  │  (axum, OpenAI-compatible /v1/chat/completions)
   │   + CLI REPL         │
   └────────┬─────────────┘
            │
-  ┌────────▼─────────────┐
+  ┌────────▼──────────────┐
   │    Agent Loop         │  (message → LLM → parse tool calls → execute → repeat)
   │  ┌─────────────────┐  │
-  │  │  LLM Abstraction │  │  (trait: OllamaBackend, LlamaCppBackend, etc.)
+  │  │ LLM Abstraction │  │  (trait: OllamaBackend, LlamaCppBackend, etc.)
   │  └─────────────────┘  │
   │  ┌─────────────────┐  │
-  │  │  Tool Registry    │  │  (trait: Tool, per-project tool sets)
+  │  │  Tool Registry  │  │  (trait: Tool, per-project tool sets)
   │  └─────────────────┘  │
   │  ┌─────────────────┐  │
-  │  │  Skill/Profile   │  │  (system prompt + tool set + config per role)
+  │  │  Skill/Profile  │  │  (system prompt + tool set + config per role)
   │  └─────────────────┘  │
   └───────────────────────┘
            │
-  ┌────────▼─────────────┐
+  ┌────────▼──────────────┐
   │   Ollama (local)      │  (localhost:11434, model inference)
   └───────────────────────┘
 ```

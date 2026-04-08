@@ -29,3 +29,8 @@ Desktop.ini
 
 # Logs
 *.log
+
+
+# Added by cargo
+
+/target
