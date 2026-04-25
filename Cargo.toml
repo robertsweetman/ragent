@@ -2,5 +2,33 @@
 name = "ragent"
 version = "0.1.0"
 edition = "2024"
+description = "A local-only agentic AI framework in Rust"
+license = "GPL-3.0"
 
 [dependencies]
+# Async runtime — the standard choice for async Rust, battle-tested
+tokio = { version = "1", features = ["full"] }
+
+# Serialisation — universal in the Rust ecosystem
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client — for talking to Ollama's REST API (raw reqwest, not ollama-rs, for full transparency)
+reqwest = { version = "0.12", features = ["json"] }
+
+# Structured logging — async-aware, gives us full visibility into the agent loop
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# CLI argument parsing — de facto standard, using derive macros
+clap = { version = "4", features = ["derive"] }
+
+# Terminal colours — for distinguishing user/assistant/system output in the REPL
+colored = "2"
+
+# Config file parsing — human-readable TOML config
+toml = "0.8"
+
+# Error handling — thiserror for library errors, anyhow for application-level
+anyhow = "1"
+thiserror = "2"

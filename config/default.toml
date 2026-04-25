@@ -1,0 +1,12 @@
+# ragent default configuration
+# Override these via CLI flags or a project-local ragent.toml
+
+[ollama]
+# URL where Ollama is running
+url = "http://localhost:11434"
+# Default model to use (must be pulled in Ollama first)
+model = "deepseek-r1:8b"
+# LLM temperature (0.0 = deterministic, 1.0 = creative). Optional.
+# temperature = 0.7
+# Context window size in tokens. Optional — uses model default if unset.
+# context_window = 4096
