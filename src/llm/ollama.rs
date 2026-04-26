@@ -32,6 +32,17 @@ pub enum OllamaError {
     #[error("Model '{model}' is not available locally.\n  -> Pull it with: ollama pull {model}")]
     ModelNotFound { model: String },
 
+    #[error(
+        "Model '{model}' does not support tool/function calling.\n  \
+         Tool calling is required for the agent loop (Phase 2+).\n  \
+         Switch to a model that supports tools, for example:\n    \
+         ollama pull qwen2.5-coder:32b\n    \
+         ollama pull qwen3-coder:30b\n    \
+         ollama pull mistral:7b\n  \
+         Then run ragent with: ragent --model <model_name>"
+    )]
+    ToolsNotSupported { model: String },
+
     #[error("Ollama returned an error: {message}")]
     ApiError { message: String },
 }
@@ -236,6 +247,18 @@ impl LlmBackend for OllamaBackend {
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             warn!(status = %status, body = %body, "Ollama returned error");
+
+            // Detect the specific "does not support tools" error so we can
+            // give the user an actionable message instead of a raw HTTP dump.
+            // Ollama returns this as a 400 when you send tool definitions to
+            // a model that wasn't trained for function calling (e.g. deepseek-r1).
+            if body.contains("does not support tools") {
+                return Err(OllamaError::ToolsNotSupported {
+                    model: self.config.model.clone(),
+                }
+                .into());
+            }
+
             anyhow::bail!("Ollama returned HTTP {}: {}", status, body);
         }
 

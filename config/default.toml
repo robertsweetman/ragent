@@ -5,8 +5,33 @@
 # URL where Ollama is running
 url = "http://localhost:11434"
 # Default model to use (must be pulled in Ollama first)
-model = "deepseek-r1:8b"
+model = "qwen2.5-coder:7b"
 # LLM temperature (0.0 = deterministic, 1.0 = creative). Optional.
 # temperature = 0.7
 # Context window size in tokens. Optional — uses model default if unset.
 # context_window = 4096
+
+[agent]
+# Maximum tool-call loop iterations before the agent stops.
+# This is a safety limit to prevent infinite loops if the LLM keeps requesting tools.
+max_iterations = 20
+# System prompt that defines the agent's behaviour.
+system_prompt = "You are a helpful AI assistant running locally via ragent. You have access to tools for reading files, writing files, searching files, and executing shell commands. Use them when appropriate to accomplish tasks. Be concise and helpful."
+
+[tools.shell]
+# Timeout in seconds for shell command execution.
+timeout_secs = 30
+# Maximum output size in bytes captured from shell commands (stdout + stderr).
+max_output_bytes = 102400  # 100 KB
+# Working directory for shell commands. Defaults to current directory if unset.
+# working_directory = "."
+
+[tools.file]
+# Maximum file size in bytes that the file read tool will return.
+max_read_bytes = 1048576  # 1 MB
+# Maximum number of search results returned by the file search tool.
+max_search_results = 50
+# Base directory that file tools are restricted to. Prevents directory traversal.
+# All file paths are resolved relative to this and must stay within it.
+# Defaults to current directory if unset.
+# sandbox_path = "."

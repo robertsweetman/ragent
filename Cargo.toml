@@ -32,3 +32,13 @@ toml = "0.8"
 # Error handling — thiserror for library errors, anyhow for application-level
 anyhow = "1"
 thiserror = "2"
+
+# Phase 2: Tool system dependencies
+# Regex for file content search (FileSearchTool / grep-like functionality)
+regex = "1"
+# Recursive directory traversal for file search
+walkdir = "2"
+
+[dev-dependencies]
+# Temporary directories for sandboxed file tool tests
+tempfile = "3"

@@ -229,3 +229,55 @@ ragent/
 **Out of scope (for now)**: GUI/Web UI, TUI (ratatui), MCP server implementation, voice interface, persistent memory/RAG (vector DB), image/multimodal support
 
 Persistent memory example can be found here [mempalace](https://github.com/milla-jovovich/mempalace) pretty useful although implemented in Python
+
+## Known Issues & Lessons Learned
+
+Issues discovered during Phase 1 & 2 implementation, documented here so they inform future phases.
+
+### Working Directory Isolation (discovered Phase 2)
+
+**Problem**: The agent's file tools and shell tool default to ragent's own project directory as their working directory. When the agent runs `cargo build`, it recompiles *ragent itself* — and on Windows, the running `ragent.exe` is file-locked, so the build fails with "Access is denied (os error 5)". The agent then loops retrying the same failing command.
+
+**Root cause**: No separation between "ragent's code" and "the agent's workspace". The `[tools.shell].working_directory` and `[tools.file].sandbox_path` config options exist but default to `.` (current directory = ragent's project root).
+
+**Fix for Phase 3**:
+- Default the agent workspace to a separate directory (e.g. `~/.ragent/workspace/` or a configurable `--workspace` CLI flag)
+- When ragent is pointed at a target project (`ragent --project /path/to/project`), use *that* directory as the sandbox, never ragent's own source tree
+- Consider creating a temporary directory per session for scratch work
+
+### Repeated Failure Detection (discovered Phase 2)
+
+**Problem**: When a tool call fails (e.g. `cargo build` → "Access is denied"), smaller models (7B) blindly retry the exact same command on every iteration until they hit the max iterations safety limit (20 by default). The model doesn't reason about *why* it failed or try a different approach.
+
+**Impact**: Burns all 20 iterations on identical failing calls, wastes time, floods the context window with repeated error messages.
+
+**Fix for Phase 3**:
+- Track consecutive identical tool calls with identical errors — if the same (tool_name, args) fails N times in a row (e.g. 3), inject a system-level hint: "This tool call has failed N times with the same error. Try a different approach."
+- Alternatively, refuse to execute the same failing call more than N times and return a synthetic error explaining the situation
+- Consider reducing `max_iterations` for smaller models (e.g. 10 instead of 20)
+
+### Model Text-Format Tool Calls (discovered Phase 2)
+
+**Problem**: Smaller models (e.g. `qwen2.5-coder:7b`) often understand tool calling conceptually but return tool calls as JSON text in the `content` field instead of using Ollama's structured `tool_calls` response format. Three patterns observed:
+
+1. **Single code-fenced call**: `` ```json {"name": "file_write", ...} ``` ``
+2. **Multiple code-fenced calls** interleaved with prose: "Let me write the file `` ```json {...} ``` `` Now compile it `` ```json {...} ``` ``"
+3. **Bare JSON in prose** with no code fences: "Let's check. `{"name": "shell_exec", ...}`"
+
+**Fix implemented**: A three-strategy fallback parser in `agent_loop.rs` that extracts tool calls from all three patterns, validated against registered tool names to prevent false positives. This makes ragent robust with smaller models.
+
+**Lesson**: Don't assume models will use the structured API correctly. Always have a fallback parser. This is especially important for a framework that aims to work with many different local models.
+
+### Model Tool Support Compatibility (discovered Phase 2)
+
+**Problem**: Not all Ollama models support the tool/function calling API. `deepseek-r1:8b` (a reasoning model) returns HTTP 400 "does not support tools" when tool definitions are included in the request.
+
+**Fix implemented**:
+- Changed default model from `deepseek-r1:8b` to `qwen2.5-coder:7b` (supports tools, smaller footprint)
+- Added `OllamaError::ToolsNotSupported` variant with actionable error message
+- Added startup warning for known-bad model families
+- Runtime detection of the 400 error with coloured output listing available alternatives
+
+**Known models WITHOUT tool support**: `deepseek-r1`, `gemma`, `gemma2`, `gemma3`, `gemma4`, `phi`, `phi3`, `tinyllama`
+
+**Known models WITH tool support**: `qwen2.5-coder`, `qwen3-coder`, `qwen3`, `mistral`, `llama3.1`, `llama3.2`

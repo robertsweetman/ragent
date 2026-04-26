@@ -1,10 +1,11 @@
-//! Agent module — core agent types and conversation management.
+//! Agent module — core agent types, conversation management, and the agent loop.
 //!
-//! This module contains the message types that mirror the Ollama/OpenAI chat API
-//! format, plus a `Conversation` helper for managing ordered message history.
+//! This module contains:
+//! - `message` — Message types that mirror the Ollama/OpenAI chat API format,
+//!   plus a `Conversation` helper for managing ordered message history.
+//! - `agent_loop` — The core agentic loop that cycles between LLM calls and
+//!   tool execution until the LLM produces a final text response.
 
+pub mod agent_loop;
 pub mod message;
 
-// Note: loop.rs exists but is not wired up until Phase 2 (tool system).
-// Rust won't let us write `mod loop;` because `loop` is a keyword.
-// We'll use `mod agent_loop;` and rename the file in Phase 2.
