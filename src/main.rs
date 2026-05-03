@@ -297,7 +297,7 @@ async fn main() -> Result<()> {
     );
     println!("{}", "-".repeat(60).dimmed());
 
-    run_repl(agent, &system_prompt, &config).await
+    run_repl(agent, system_prompt, config, skill).await
 }
 
 /// Build the tool registry, wiring config into each tool.
@@ -455,10 +455,15 @@ async fn warn_if_tools_unsupported(model: &str, backend: &OllamaBackend) {
 }
 
 /// Run the interactive REPL loop using the agent loop.
+///
+/// Takes ownership of `config`, `skill`, and `system_prompt` so the
+/// `/workspace` command can mutate them in-place to switch projects
+/// without restarting the process.
 async fn run_repl(
     mut agent: AgentLoop<OllamaBackend>,
-    system_prompt: &str,
-    config: &AppConfig,
+    mut system_prompt: String,
+    mut config: AppConfig,
+    skill: Skill,
 ) -> Result<()> {
     let stdin = io::stdin();
     let mut reader = stdin.lock().lines();
@@ -490,13 +495,17 @@ async fn run_repl(
                 break;
             }
             "/clear" => {
-                agent.clear_conversation(system_prompt);
+                agent.clear_conversation(&system_prompt);
                 println!("{}", "Conversation cleared.".yellow());
                 continue;
             }
             "/help" => {
                 println!("{}", "Commands:".yellow().bold());
                 println!("  {}  -- Clear conversation history", "/clear".cyan());
+                println!(
+                    "  {}  -- Switch workspace directory",
+                    "/workspace <path>".cyan()
+                );
                 println!("  {}   -- Exit ragent", "/quit".cyan());
                 println!("  {}   -- Exit ragent", "/exit".cyan());
                 println!("  {}   -- Show this help", "/help".cyan());
@@ -520,6 +529,106 @@ async fn run_repl(
                     "\n{}",
                     "The agent uses tools automatically when needed. Just describe what you want!"
                         .dimmed()
+                );
+                continue;
+            }
+            _ if input.starts_with("/workspace") => {
+                let path_str = input.strip_prefix("/workspace").unwrap_or("").trim();
+
+                if path_str.is_empty() {
+                    // No argument — show the current workspace.
+                    let current = config
+                        .tools
+                        .file
+                        .sandbox_path
+                        .as_deref()
+                        .unwrap_or("(current directory)");
+                    println!("{}", format!("Current workspace: {current}").yellow());
+                    println!("{}", "Usage: /workspace <path>".dimmed());
+                    continue;
+                }
+
+                let new_path = PathBuf::from(path_str);
+                let abs = match new_path.canonicalize() {
+                    Ok(p) if p.is_dir() => p,
+                    Ok(p) => {
+                        eprintln!(
+                            "{}",
+                            format!("Error: '{}' is not a directory.", p.display()).red()
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{}",
+                            format!("Error: Cannot access '{}': {e}", path_str).red()
+                        );
+                        continue;
+                    }
+                };
+
+                // --- Update config to point at the new workspace ---
+                config.tools.file.sandbox_path = Some(abs.to_string_lossy().into_owned());
+                config.tools.shell.working_directory = Some(abs.to_string_lossy().into_owned());
+
+                // --- Reload project context for the new workspace ---
+                let new_context = if config.project.auto_detect {
+                    match ProjectContext::load(
+                        &abs,
+                        config.project.max_tree_depth,
+                        config.project.max_key_file_bytes,
+                    ) {
+                        Ok(ctx) => {
+                            info!(
+                                workspace = %abs.display(),
+                                project_type = %ctx.project_type.display_name(),
+                                "Project context reloaded for new workspace"
+                            );
+                            Some(ctx.format_for_prompt())
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to load project context — continuing without it");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                // --- Rebuild the system prompt with new context ---
+                //
+                // We update the local `system_prompt` binding so that
+                // subsequent `/clear` commands use the new prompt too.
+                system_prompt = skill.build_system_prompt(new_context.as_deref());
+
+                // --- Rebuild the tool registry with the new sandbox/working-dir ---
+                let new_registry = build_tool_registry(&config);
+
+                // --- Reconstruct the agent loop ---
+                //
+                // Option A (from the design discussion): we replace the agent
+                // entirely. The old `agent` is dropped here, which is fine —
+                // all state we want to keep (the skill, the config, the backend
+                // connection details) either lives in the new agent or in the
+                // surrounding `run_repl` locals.
+                //
+                // A fresh `AgentLoop::new` always starts with a clean conversation
+                // (system prompt only), so the user gets a blank slate relative
+                // to the new project.
+                agent = AgentLoop::new(
+                    OllamaBackend::new(config.ollama.clone()),
+                    new_registry,
+                    &system_prompt,
+                    config.agent.max_iterations,
+                );
+
+                println!(
+                    "{}",
+                    format!("Workspace → {}", abs.display()).green().bold()
+                );
+                println!(
+                    "{}",
+                    "Conversation cleared and project context reloaded.".dimmed()
                 );
                 continue;
             }
