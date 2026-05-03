@@ -5,6 +5,13 @@
 # Cargo lock is committed for binaries
 # Cargo.lock  # uncomment if this becomes a library-only crate
 
+# ragent CARGO_TARGET_DIR isolation
+# When ragent runs shell commands that invoke cargo, it sets CARGO_TARGET_DIR
+# to avoid Windows MAX_PATH issues. If the temp dir resolves to a relative path
+# (e.g. in some CI environments), the artifacts may land here.
+*ragent-target/
+Temp*/
+
 # IDE / Editor
 .idea/
 .vscode/

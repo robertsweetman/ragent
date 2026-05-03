@@ -126,35 +126,35 @@ ragent/
 **Goal**: Agent writes, tests, and iterates on code effectively.
 *Depends on Phase 2.*
 
-1. Define `Skill` struct in `agent/skill.rs`:
+1. Define `Skill` struct in `agent/skill.rs`:  ✅
    - System prompt template
    - Allowed tool set
    - Project context (files to auto-include)
    - Config overrides (model, temperature)
-2. Build a "code-writer" skill:
+2. Build a "code-writer" skill:  ✅
    - System prompt tuned for code generation
    - All file + shell tools enabled
    - Project-aware context loading (reads key files)
-3. Add `ProjectContext` loader:
+3. Add `ProjectContext` loader:  ✅
    - Reads project structure (tree)
    - Loads key files (Cargo.toml, README, etc.)
-   - Configurable via per-project TOML
-4. Add test execution tool:
-   - Runs `cargo test` / `npm test` / etc. based on project type
-   - Parses output for pass/fail
-5. **Cargo `--target-dir` isolation (Windows)**:
-   - When the agent runs `cargo build` or `cargo run` in a workspace, instruct it
-     to use a shared target directory outside the workspace (e.g. `%TEMP%\ragent-target`)
-     via the `--target-dir` flag or `CARGO_TARGET_DIR` environment variable
-   - Rationale: `cargo build` creates a deeply nested `target\` directory that easily
-     exceeds Windows' legacy `MAX_PATH` limit of 260 characters. Paths like
-     `workspace\hello_world\target\debug\.fingerprint\hello_world-abc123\` can exceed
-     this limit, making the directory impossible to delete from `cmd.exe` or PowerShell
-     (though Windows File Explorer handles it fine via the Unicode extended path API)
-   - Using a shared `--target-dir` also speeds up incremental builds across sessions
-   - Consider setting `CARGO_TARGET_DIR` in the shell tool's environment by default
-     when a workspace is active, so the agent doesn't need to remember to pass the flag
-6. **Verification**: Point ragent at a Rust project, ask it to add a function with tests — verify it reads existing code, writes new code, runs tests, fixes failures
+   - Configurable via `[project]` TOML section
+4. Add `FilePatchTool`:  ✅ (replaces "test execution" which is covered by `shell_exec`)
+   - Surgical find-and-replace edits (old_text → new_text)
+   - Exact-once occurrence requirement prevents accidental multi-site edits
+   - Falls back to `file_write` for new files
+5. **Cargo `--target-dir` isolation (Windows)**:  ✅
+   - `CARGO_TARGET_DIR` auto-set to `{TEMP}/ragent-target` when workspace is active
+   - Set per-command via `ShellConfig.cargo_target_dir` env-var injection
+   - Configurable in `[tools.shell]` TOML
+6. **Repeated-failure circuit breaker**:  ✅
+   - Tracks consecutive failures per (tool_name, args) pair
+   - Fires after 3 identical failing calls with actionable message
+   - Resets counter on success so transient errors don't accumulate
+7. **CLI: `--skill` flag**:  ✅
+   - `--skill code` (default) → code-writer skill with project context
+   - `--skill chat` → simple chat assistant
+8. **Verification**: Point ragent at a Rust project, ask it to add a function with tests — verify it reads existing code, writes new code, runs tests, fixes failures
 
 ### Phase 4: API Server + Editor Integration
 
@@ -294,3 +294,15 @@ Issues discovered during Phase 1 & 2 implementation, documented here so they inf
 **Known models WITHOUT tool support**: `deepseek-r1`, `gemma`, `gemma2`, `gemma3`, `gemma4`, `phi`, `phi3`, `tinyllama`
 
 **Known models WITH tool support**: `qwen2.5-coder`, `qwen3-coder`, `qwen3`, `mistral`, `llama3.1`, `llama3.2`
+
+### CARGO_TARGET_DIR Relative Path (discovered Phase 3)
+
+**Problem**: When the sub-agents ran `cargo test` during Phase 3 development, `std::env::temp_dir()` returned a non-absolute path (`Temp`) in the subprocess environment. This caused `PathBuf::from("Temp").join("ragent-target")` to resolve to `Tempragent-target/` inside the ragent repository root, and those Cargo fingerprint files were accidentally committed.
+
+**Root cause**: `std::env::temp_dir()` on Windows reads `TMP`/`TEMP` environment variables. In the subprocess shell spawned by the test runner, these may not be set to a full absolute path, falling back to a relative value.
+
+**Fix**: Added `*ragent-target/` and `Temp*/` patterns to `.gitignore`. The auto-set CARGO_TARGET_DIR logic already runs only in `main()` (production) not during tests, so this only affects the very specific case of running `cargo test` itself inside a shell that has the ragent CARGO_TARGET_DIR already set. For extra safety, consider wrapping with `dunce::canonicalize` or an `is_absolute()` guard if this proves problematic in practice.
+
+### FilePatch vs. FileWrite for existing files (design note, Phase 3)
+
+**Observation**: Smaller models (7B) sometimes use `file_write` to overwrite an entire file when they only intend to change a few lines, losing other content in the process. The `file_patch` tool was added specifically to encourage surgical edits. However, models need the system prompt to explicitly tell them *when* to use each: `file_patch` for modifying existing files, `file_write` only for new files or deliberate full rewrites. The code-writer skill's system prompt covers this.
