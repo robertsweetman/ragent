@@ -142,7 +142,19 @@ ragent/
 4. Add test execution tool:
    - Runs `cargo test` / `npm test` / etc. based on project type
    - Parses output for pass/fail
-5. **Verification**: Point ragent at a Rust project, ask it to add a function with tests — verify it reads existing code, writes new code, runs tests, fixes failures
+5. **Cargo `--target-dir` isolation (Windows)**:
+   - When the agent runs `cargo build` or `cargo run` in a workspace, instruct it
+     to use a shared target directory outside the workspace (e.g. `%TEMP%\ragent-target`)
+     via the `--target-dir` flag or `CARGO_TARGET_DIR` environment variable
+   - Rationale: `cargo build` creates a deeply nested `target\` directory that easily
+     exceeds Windows' legacy `MAX_PATH` limit of 260 characters. Paths like
+     `workspace\hello_world\target\debug\.fingerprint\hello_world-abc123\` can exceed
+     this limit, making the directory impossible to delete from `cmd.exe` or PowerShell
+     (though Windows File Explorer handles it fine via the Unicode extended path API)
+   - Using a shared `--target-dir` also speeds up incremental builds across sessions
+   - Consider setting `CARGO_TARGET_DIR` in the shell tool's environment by default
+     when a workspace is active, so the agent doesn't need to remember to pass the flag
+6. **Verification**: Point ragent at a Rust project, ask it to add a function with tests — verify it reads existing code, writes new code, runs tests, fixes failures
 
 ### Phase 4: API Server + Editor Integration
 
@@ -244,6 +256,7 @@ Issues discovered during Phase 1 & 2 implementation, documented here so they inf
 - Default the agent workspace to a separate directory (e.g. `~/.ragent/workspace/` or a configurable `--workspace` CLI flag)
 - When ragent is pointed at a target project (`ragent --project /path/to/project`), use *that* directory as the sandbox, never ragent's own source tree
 - Consider creating a temporary directory per session for scratch work
+- **Windows MAX_PATH side-effect**: When `cargo build` runs inside the workspace, the generated `target\` directory creates paths that easily exceed Windows' legacy 260-character `MAX_PATH` limit (e.g. `workspace\hello_world\target\debug\.fingerprint\hello_world-abc123\`). These cannot be deleted from `cmd.exe` or PowerShell, only from Windows File Explorer (which uses the Unicode extended path API). Mitigation: set `CARGO_TARGET_DIR` to a short path outside the workspace (e.g. `%TEMP%\ragent-target`) so deep build artifacts never land inside the sandbox. See Phase 3 item 5 for the full approach.
 
 ### Repeated Failure Detection (discovered Phase 2)
 

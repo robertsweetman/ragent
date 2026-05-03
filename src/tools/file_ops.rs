@@ -78,7 +78,10 @@ impl Default for FileToolsConfig {
 ///
 /// Returns a `ToolResult::error` if the path escapes the sandbox or can't
 /// be resolved.
-fn validate_path(raw_path: &str, sandbox: &Path) -> std::result::Result<PathBuf, ToolResult> {
+pub(crate) fn validate_path(
+    raw_path: &str,
+    sandbox: &Path,
+) -> std::result::Result<PathBuf, ToolResult> {
     if raw_path.is_empty() {
         return Err(ToolResult::error("Path cannot be empty."));
     }

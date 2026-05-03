@@ -26,6 +26,7 @@
 //! ```
 
 pub mod file_ops;
+pub mod file_patch;
 pub mod registry;
 pub mod shell;
 pub mod traits;
@@ -33,5 +34,6 @@ pub mod traits;
 // Re-export the most commonly used types so callers can write
 // `use ragent::tools::{Tool, ToolResult, ToolRegistry}` without
 // reaching into submodules.
+pub use file_patch::FilePatchTool;
 pub use registry::ToolRegistry;
 pub use traits::{Tool, ToolResult};

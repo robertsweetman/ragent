@@ -25,6 +25,10 @@ timeout_secs = 30
 max_output_bytes = 102400  # 100 KB
 # Working directory for shell commands. Defaults to current directory if unset.
 # working_directory = "."
+# Override for CARGO_TARGET_DIR. Set to a short path to avoid Windows MAX_PATH
+# issues. When a --workspace is active, ragent auto-sets this to {TEMP}/ragent-target
+# unless you specify a value here. Uncomment to pin to a fixed location:
+# cargo_target_dir = "C:\\Temp\\ragent-target"
 
 [tools.file]
 # Maximum file size in bytes that the file read tool will return.
@@ -34,4 +38,23 @@ max_search_results = 50
 # Base directory that file tools are restricted to. Prevents directory traversal.
 # All file paths are resolved relative to this and must stay within it.
 # Defaults to current directory if unset.
-# sandbox_path = "."
+# sandbox_path = "C:\\Users\\you\\workspace"
+
+# ---------------------------------------------------------------------------
+# Phase 3: Skill and project context
+# ---------------------------------------------------------------------------
+
+[skill]
+# Which built-in skill to use: "code" (code-writer) or "chat" (general assistant).
+# Override per-session with: ragent --skill chat
+name = "code"
+
+[project]
+# Automatically detect and inject project context (file tree + key files) into
+# the system prompt when a workspace is set. The LLM starts with a mental model
+# of the project structure, reducing the need to explore manually.
+auto_detect = true
+# Maximum directory depth for the file tree (0 = root only, 4 = default).
+max_tree_depth = 4
+# Maximum bytes to include from each key file (Cargo.toml, README, etc.).
+max_key_file_bytes = 16384  # 16 KB

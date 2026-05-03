@@ -116,6 +116,14 @@ impl<B: LlmBackend> AgentLoop<B> {
         let tool_defs = self.registry.tool_definitions();
         let has_tools = !tool_defs.is_empty();
 
+        // Circuit breaker: tracks how many consecutive times each (tool, args)
+        // pair has returned an error. If the same call fails 3 times in a row,
+        // the agent has clearly misunderstood something and we surface a helpful
+        // message rather than spinning until max_iterations.
+        //
+        // Key: "{tool_name}:{args_json}"  |  Value: consecutive failure count
+        let mut consecutive_failures: std::collections::HashMap<String, usize> = Default::default();
+
         // Step 2-4: Loop until the LLM responds with plain text (no tool calls).
         for iteration in 1..=self.max_iterations {
             info!(iteration = iteration, "Agent loop iteration");
@@ -236,6 +244,22 @@ impl<B: LlmBackend> AgentLoop<B> {
                                 }
                             };
 
+                        // Prepare circuit-breaker state before the content
+                        // is moved into the message below.
+                        let failure_key = format!(
+                            "{}:{}",
+                            tool_name,
+                            serde_json::to_string(tool_args).unwrap_or_default()
+                        );
+                        let tool_was_error = tool_result.is_error;
+                        // Clone only when we need the message for the circuit-breaker
+                        // warning (avoids cloning on the happy path).
+                        let error_content_for_cb = if tool_result.is_error {
+                            Some(tool_result.content.clone())
+                        } else {
+                            None
+                        };
+
                         // Add the tool result to the conversation as a Tool message.
                         // The LLM will see this in the next iteration and can decide
                         // what to do next (call another tool, or respond with text).
@@ -249,6 +273,42 @@ impl<B: LlmBackend> AgentLoop<B> {
                         };
 
                         self.conversation.push(tool_message);
+
+                        // --- Circuit breaker ---
+                        //
+                        // If the LLM calls the same tool with identical args and keeps
+                        // getting an error, it's stuck. After 3 consecutive failures we
+                        // return a helpful message so the user can unblock it, rather
+                        // than burning through max_iterations pointlessly.
+                        const CIRCUIT_BREAKER_LIMIT: usize = 3;
+                        if tool_was_error {
+                            let count =
+                                consecutive_failures.entry(failure_key.clone()).or_insert(0);
+                            *count += 1;
+                            if *count >= CIRCUIT_BREAKER_LIMIT {
+                                warn!(
+                                    tool = %tool_name,
+                                    consecutive_failures = *count,
+                                    "Circuit breaker triggered — stopping agent loop"
+                                );
+                                return Ok(format!(
+                                    "[ragent: Stopped — tool '{}' failed {} consecutive times \
+                                     with the same arguments.]\n\
+                                     Last error: {}\n\n\
+                                     Suggestions:\n\
+                                     - Check the arguments passed to the tool\n\
+                                     - Try a different approach\n\
+                                     - Ask the user for clarification or more context",
+                                    tool_name,
+                                    count,
+                                    error_content_for_cb.unwrap_or_default(),
+                                ));
+                            }
+                        } else {
+                            // Success — reset the failure counter for this (tool, args) pair.
+                            // The LLM is making progress; don't carry old failure state forward.
+                            consecutive_failures.remove(&failure_key);
+                        }
                     }
 
                     // Continue the loop — send the tool results back to the LLM.
@@ -658,6 +718,50 @@ mod tests {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             let output = self.output.to_string();
             Box::pin(async move { Ok(ToolResult::success(output)) })
+        }
+    }
+
+    /// A mock tool that always returns an error. Used to test the circuit breaker.
+    struct MockErrorTool {
+        tool_name: &'static str,
+        error_message: &'static str,
+        call_count: Arc<AtomicUsize>,
+    }
+
+    impl MockErrorTool {
+        fn new(name: &'static str, msg: &'static str) -> (Self, Arc<AtomicUsize>) {
+            let counter = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    tool_name: name,
+                    error_message: msg,
+                    call_count: counter.clone(),
+                },
+                counter,
+            )
+        }
+    }
+
+    impl Tool for MockErrorTool {
+        fn name(&self) -> &str {
+            self.tool_name
+        }
+
+        fn description(&self) -> &str {
+            "A mock tool that always errors"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            serde_json::json!({ "type": "object", "properties": {}, "required": [] })
+        }
+
+        fn execute(
+            &self,
+            _args: Value,
+        ) -> Pin<Box<dyn Future<Output = Result<ToolResult>> + Send + '_>> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let msg = self.error_message.to_string();
+            Box::pin(async move { Ok(ToolResult::error(msg)) })
         }
     }
 
@@ -1159,5 +1263,51 @@ Now compile:
         assert_eq!(result, "Both tools ran successfully!");
         assert_eq!(count_a.load(Ordering::SeqCst), 1, "tool_a should run once");
         assert_eq!(count_b.load(Ordering::SeqCst), 1, "tool_b should run once");
+    }
+
+    /// Circuit breaker test: if the LLM calls the same tool with identical args
+    /// and it fails 3 times in a row, the agent loop should stop and surface
+    /// a helpful message rather than burning through max_iterations.
+    #[tokio::test]
+    async fn test_circuit_breaker_triggers_after_repeated_failures() {
+        // Backend keeps returning the same tool call — the LLM is stuck.
+        let backend = MockBackend::new(vec![
+            tool_call_response("flaky_tool", serde_json::json!({})),
+            tool_call_response("flaky_tool", serde_json::json!({})),
+            tool_call_response("flaky_tool", serde_json::json!({})),
+            // This 4th response would only be reached if the circuit breaker
+            // didn't fire — if the test sees this, something is wrong.
+            text_response("Should never reach here"),
+        ]);
+
+        let (error_tool, call_count) =
+            MockErrorTool::new("flaky_tool", "file not found: does_not_exist.txt");
+        let mut registry = ToolRegistry::new();
+        registry.register(error_tool);
+
+        // Give enough max_iterations that the safety limit won't fire first.
+        let mut agent = AgentLoop::new(backend, registry, "You are helpful.", 20);
+        let result = agent.process_message("Try the flaky tool").await.unwrap();
+
+        // The circuit breaker fires: result should mention the tool name and failure count.
+        assert!(
+            result.contains("flaky_tool"),
+            "Expected tool name in circuit-breaker message, got: {result}"
+        );
+        assert!(
+            result.contains("3"),
+            "Expected failure count (3) in circuit-breaker message, got: {result}"
+        );
+        assert!(
+            !result.contains("Should never reach here"),
+            "Circuit breaker should have fired before the 4th LLM call"
+        );
+
+        // Tool should have been called exactly 3 times (limit = 3).
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            3,
+            "Tool should be called exactly 3 times before circuit breaker fires"
+        );
     }
 }

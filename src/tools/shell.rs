@@ -53,6 +53,15 @@ pub struct ShellConfig {
 
     /// Working directory for commands. If `None`, uses the current directory.
     pub working_directory: Option<String>,
+
+    /// Value to inject as the `CARGO_TARGET_DIR` environment variable for
+    /// every shell command. When set, Cargo builds use this shared directory
+    /// instead of creating a `target/` inside the workspace — critical on
+    /// Windows where deeply nested paths exceed the 260-char `MAX_PATH` limit.
+    ///
+    /// Set automatically to `{TEMP}/ragent-target` when a workspace is active.
+    /// Set to `None` to disable (Cargo uses its default `target/` directory).
+    pub cargo_target_dir: Option<String>,
 }
 
 fn default_timeout_secs() -> u64 {
@@ -69,6 +78,7 @@ impl Default for ShellConfig {
             timeout_secs: default_timeout_secs(),
             max_output_bytes: default_max_output_bytes(),
             working_directory: None,
+            cargo_target_dir: None,
         }
     }
 }
@@ -135,6 +145,21 @@ impl ShellExecTool {
         };
 
         cmd.current_dir(working_dir);
+
+        // Inject CARGO_TARGET_DIR if configured.
+        //
+        // On Windows, Cargo's default `target/` directory quickly produces paths
+        // like `workspace\hello\target\debug\.fingerprint\foo-abc123\` that exceed
+        // 260 characters and can't be deleted via `cmd.exe` or PowerShell.
+        // Using a short path in %TEMP% avoids this entirely and also allows
+        // incremental compilation to be shared across sessions.
+        if let Some(ref target_dir) = self.config.cargo_target_dir {
+            debug!(
+                cargo_target_dir = %target_dir,
+                "Injecting CARGO_TARGET_DIR environment variable"
+            );
+            cmd.env("CARGO_TARGET_DIR", target_dir);
+        }
 
         // Capture both stdout and stderr so the LLM sees the full picture.
         cmd.stdout(std::process::Stdio::piped());
@@ -338,6 +363,7 @@ mod tests {
             timeout_secs: 5,
             max_output_bytes: 1024,
             working_directory: None,
+            cargo_target_dir: None,
         })
     }
 
@@ -427,6 +453,7 @@ mod tests {
             timeout_secs: 5,
             max_output_bytes: 20, // Very small limit
             working_directory: None,
+            cargo_target_dir: None,
         });
 
         let command = if cfg!(target_os = "windows") {
@@ -451,6 +478,7 @@ mod tests {
             timeout_secs: 1,
             max_output_bytes: 1024,
             working_directory: None,
+            cargo_target_dir: None,
         });
 
         let command = if cfg!(target_os = "windows") {

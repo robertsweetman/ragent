@@ -1,8 +1,9 @@
 //! ragent CLI — interactive chat with a local LLM via Ollama.
 //!
-//! Phase 2 entry point: a REPL that uses the **agent loop** to cycle between
-//! LLM calls and tool execution. The agent can read/write files, search for
-//! patterns, and execute shell commands autonomously.
+//! Phase 3 entry point: adds the Skill system (code-writer / chat), project
+//! context auto-loading (directory tree + key files injected into the prompt),
+//! the `file_patch` tool for surgical edits, and CARGO_TARGET_DIR isolation
+//! to prevent Windows MAX_PATH issues in Cargo workspaces.
 //!
 //! It also handles:
 //! - Checking if Ollama is installed and running
@@ -11,8 +12,8 @@
 //! - Detecting models that don't support tool calling
 //! - Isolating the agent's file/shell operations to a configurable workspace
 //!
-//! # Phase 2 (PLAN.md)
-//! Goal: "Agent autonomously uses tools to accomplish multi-step tasks."
+//! # Phase 3 (PLAN.md)
+//! Goal: "Agent writes, tests, and iterates on code effectively."
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -23,10 +24,12 @@ use colored::Colorize;
 use tracing::{error, info, warn};
 
 use ragent::agent::agent_loop::AgentLoop;
+use ragent::agent::{ProjectContext, Skill};
 use ragent::config::AppConfig;
 use ragent::llm::ollama::{OllamaBackend, OllamaError};
 use ragent::tools::ToolRegistry;
 use ragent::tools::file_ops::{FileReadTool, FileSearchTool, FileToolsConfig, FileWriteTool};
+use ragent::tools::file_patch::FilePatchTool;
 use ragent::tools::shell::ShellExecTool;
 
 /// Models known NOT to support Ollama's tool/function calling format.
@@ -45,7 +48,7 @@ const MODELS_WITHOUT_TOOL_SUPPORT: &[&str] = &[
 /// ragent — a local-only agentic AI framework.
 ///
 /// Chat with a local LLM through Ollama with full request/response logging.
-/// The agent can use tools (file read/write/search, shell execution) to
+/// The agent can use tools (file read/write/patch/search, shell execution) to
 /// accomplish multi-step tasks autonomously.
 ///
 /// # Workspace isolation
@@ -69,6 +72,14 @@ struct Cli {
     /// Use 'debug' to see full HTTP request/response payloads and tool calls.
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Skill to use. Built-in options: "code" (code-writer, default) or "chat" (general assistant).
+    ///
+    /// The "code" skill uses a detailed system prompt that guides the agent
+    /// through a read → patch → test → verify workflow for software development.
+    /// The "chat" skill uses a simpler prompt suitable for general conversation.
+    #[arg(long, default_value = "code")]
+    skill: Option<String>,
 
     /// Workspace directory for the agent's file and shell operations.
     ///
@@ -96,7 +107,7 @@ async fn main() -> Result<()> {
     // --- Load config ---
     let mut config = AppConfig::load()
         .context("Failed to load configuration")?
-        .with_overrides(cli.model, cli.ollama_url);
+        .with_overrides(cli.model, cli.ollama_url, cli.skill);
 
     // --- Apply workspace override ---
     //
@@ -136,6 +147,21 @@ async fn main() -> Result<()> {
     // Push workspace into config so build_tool_registry picks it up.
     config.tools.file.sandbox_path = Some(workspace.to_string_lossy().into_owned());
     config.tools.shell.working_directory = Some(workspace.to_string_lossy().into_owned());
+
+    // --- Auto-set CARGO_TARGET_DIR to avoid Windows MAX_PATH issues ---
+    //
+    // On Windows, Cargo's default `target/` lives inside the workspace, quickly
+    // producing paths >260 chars that can't be deleted from cmd.exe/PowerShell.
+    // We redirect it to a short path in %TEMP% shared across all sessions.
+    // This speeds up incremental builds too (fingerprints survive workspace cleans).
+    if config.tools.shell.cargo_target_dir.is_none() {
+        let cargo_target = std::env::temp_dir().join("ragent-target");
+        info!(
+            cargo_target_dir = %cargo_target.display(),
+            "Auto-setting CARGO_TARGET_DIR to avoid Windows MAX_PATH issues"
+        );
+        config.tools.shell.cargo_target_dir = Some(cargo_target.to_string_lossy().into_owned());
+    }
 
     info!(
         model = %config.ollama.model,
@@ -193,21 +219,69 @@ async fn main() -> Result<()> {
     // --- Build the tool registry ---
     let registry = build_tool_registry(&config);
 
+    // --- Resolve skill and build system prompt ---
+    //
+    // A Skill is a named bundle of (system prompt + tool allowlist). The CLI
+    // `--skill` flag selects which one to use; the config's `[skill]` section
+    // provides the default. If an unknown name is given, we fall back to "chat"
+    // with a warning so the user isn't silently broken.
+    let skill = Skill::builtin(&config.skill.name).unwrap_or_else(|| {
+        warn!(
+            skill = %config.skill.name,
+            "Unknown skill name, falling back to 'chat'"
+        );
+        Skill::chat()
+    });
+    info!(skill = %skill.name, "Skill selected");
+
+    // --- Load project context (if enabled) ---
+    //
+    // The ProjectContext loader reads the workspace's directory tree and key
+    // files (Cargo.toml, README, etc.) and formats them as Markdown. This
+    // Markdown is appended to the skill's system prompt so the LLM starts
+    // every session with a mental model of the project structure.
+    let project_context_str = if config.project.auto_detect {
+        match ProjectContext::load(
+            &workspace,
+            config.project.max_tree_depth,
+            config.project.max_key_file_bytes,
+        ) {
+            Ok(ctx) => {
+                info!(
+                    project_type = %ctx.project_type.display_name(),
+                    key_files = ctx.key_files.len(),
+                    "Project context loaded"
+                );
+                Some(ctx.format_for_prompt())
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to load project context — continuing without it");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Build the final system prompt: skill base + optional project context.
+    let system_prompt = skill.build_system_prompt(project_context_str.as_deref());
+
     // --- Build the agent loop ---
     let agent = AgentLoop::new(
         backend,
         registry,
-        &config.agent.system_prompt,
+        &system_prompt,
         config.agent.max_iterations,
     );
 
     // --- Start REPL ---
     println!(
-        "\n{}",
+        "{}",
         format!(
-            "ragent v{} -- chatting with {} via Ollama",
+            "ragent v{} -- chatting with {} via Ollama  [skill: {}]",
             env!("CARGO_PKG_VERSION"),
-            config.ollama.model
+            config.ollama.model,
+            skill.name
         )
         .green()
         .bold()
@@ -215,7 +289,7 @@ async fn main() -> Result<()> {
     println!("{}", format!("Workspace: {}", workspace.display()).dimmed());
     println!(
         "{}",
-        "Tools: file_read, file_write, file_search, shell_exec".dimmed()
+        "Tools: file_read, file_write, file_patch, file_search, shell_exec".dimmed()
     );
     println!(
         "{}",
@@ -223,7 +297,7 @@ async fn main() -> Result<()> {
     );
     println!("{}", "-".repeat(60).dimmed());
 
-    run_repl(agent, &config.agent.system_prompt, &config).await
+    run_repl(agent, &system_prompt, &config).await
 }
 
 /// Build the tool registry, wiring config into each tool.
@@ -246,11 +320,13 @@ fn build_tool_registry(config: &AppConfig) -> ToolRegistry {
         timeout_secs: config.tools.shell.timeout_secs,
         max_output_bytes: config.tools.shell.max_output_bytes,
         working_directory: config.tools.shell.working_directory.clone(),
+        cargo_target_dir: config.tools.shell.cargo_target_dir.clone(),
     };
 
     let mut registry = ToolRegistry::new();
     registry.register(FileReadTool::new(file_config.clone()));
     registry.register(FileWriteTool::new(file_config.clone()));
+    registry.register(FilePatchTool::new(file_config.clone()));
     registry.register(FileSearchTool::new(file_config));
     registry.register(ShellExecTool::new(shell_config));
 
@@ -427,7 +503,14 @@ async fn run_repl(
                 println!();
                 println!("{}", "Available tools:".yellow().bold());
                 println!("  {}  -- Read a file's contents", "file_read".cyan());
-                println!("  {} -- Write content to a file", "file_write".cyan());
+                println!(
+                    "  {} -- Write content to a file (whole-file)",
+                    "file_write".cyan()
+                );
+                println!(
+                    "  {} -- Surgical find/replace edit in a file",
+                    "file_patch".cyan()
+                );
                 println!(
                     "  {} -- Search for patterns in files (grep)",
                     "file_search".cyan()

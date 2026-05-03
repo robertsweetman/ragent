@@ -7,6 +7,12 @@
 //! Added `AgentConfig` (max iterations, system prompt) and `ToolsConfig`
 //! (shell timeout/limits, file sandbox/limits) to support the agent loop
 //! and tool system.
+//!
+//! # Phase 3 additions
+//! Added `SkillConfig` (which built-in skill to activate) and `ProjectConfig`
+//! (project context auto-detection settings for injecting file tree + key files
+//! into the system prompt). Also added `cargo_target_dir` to `ShellConfig`
+//! to set `CARGO_TARGET_DIR` automatically and avoid Windows MAX_PATH issues.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -26,6 +32,14 @@ pub struct AppConfig {
     /// Tool-specific configuration. Optional in the TOML — uses defaults if absent.
     #[serde(default)]
     pub tools: ToolsConfig,
+
+    /// Skill selection. Optional — defaults to the "code" skill.
+    #[serde(default)]
+    pub skill: SkillConfig,
+
+    /// Project context loading. Optional — auto-detection is on by default.
+    #[serde(default)]
+    pub project: ProjectConfig,
 }
 
 /// Configuration for the Ollama LLM backend.
@@ -111,6 +125,16 @@ pub struct ShellConfig {
     /// Working directory for shell commands.
     /// `None` means use the current directory.
     pub working_directory: Option<String>,
+
+    /// Override for the `CARGO_TARGET_DIR` environment variable.
+    ///
+    /// When set, all shell commands run with `CARGO_TARGET_DIR` pointing to
+    /// this path. This is critical on Windows where deeply nested `target/`
+    /// directories easily exceed the legacy 260-character `MAX_PATH` limit.
+    ///
+    /// Automatically set to `{TEMP}/ragent-target` when a workspace is active
+    /// (unless explicitly configured here). Set to `null` to disable.
+    pub cargo_target_dir: Option<String>,
 }
 
 fn default_shell_timeout_secs() -> u64 {
@@ -127,6 +151,87 @@ impl Default for ShellConfig {
             timeout_secs: default_shell_timeout_secs(),
             max_output_bytes: default_shell_max_output_bytes(),
             working_directory: None,
+            cargo_target_dir: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Skill configuration (Phase 3)
+// ---------------------------------------------------------------------------
+
+/// Configuration for skill selection.
+///
+/// A skill is a named bundle of (system prompt + tool allowlist) that tunes
+/// the agent for a specific task domain. Built-in skills:
+/// - `"chat"` — general-purpose assistant, all tools, simple prompt
+/// - `"code"` — software development, all tools, detailed coding workflow prompt
+#[derive(Debug, Deserialize, Clone)]
+pub struct SkillConfig {
+    /// Name of the built-in skill to activate.
+    /// Can be overridden with the `--skill` CLI flag.
+    #[serde(default = "default_skill_name")]
+    pub name: String,
+}
+
+fn default_skill_name() -> String {
+    "code".to_string()
+}
+
+impl Default for SkillConfig {
+    fn default() -> Self {
+        Self {
+            name: default_skill_name(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Project context configuration (Phase 3)
+// ---------------------------------------------------------------------------
+
+/// Configuration for automatic project context injection.
+///
+/// When a workspace is set and `auto_detect` is true, ragent reads the project's
+/// directory structure and key files (Cargo.toml, README, etc.) and injects them
+/// into the system prompt. This gives the LLM a mental model of the project
+/// before it starts working, reducing the need to explore manually.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ProjectConfig {
+    /// Whether to automatically detect and inject project context.
+    /// Disable this if you want a clean prompt with no pre-loaded context.
+    #[serde(default = "default_auto_detect")]
+    pub auto_detect: bool,
+
+    /// Maximum directory depth for the file tree (default: 4).
+    /// Deeper directories are omitted from the tree.
+    #[serde(default = "default_max_tree_depth")]
+    pub max_tree_depth: usize,
+
+    /// Maximum bytes to include from each key file (default: 16 KB).
+    /// Files larger than this are truncated with a notice.
+    #[serde(default = "default_max_key_file_bytes")]
+    pub max_key_file_bytes: usize,
+}
+
+fn default_auto_detect() -> bool {
+    true
+}
+
+fn default_max_tree_depth() -> usize {
+    4
+}
+
+fn default_max_key_file_bytes() -> usize {
+    16_384 // 16 KB
+}
+
+impl Default for ProjectConfig {
+    fn default() -> Self {
+        Self {
+            auto_detect: default_auto_detect(),
+            max_tree_depth: default_max_tree_depth(),
+            max_key_file_bytes: default_max_key_file_bytes(),
         }
     }
 }
@@ -197,12 +302,20 @@ impl AppConfig {
     ///
     /// Starts from the file-based config and overrides individual fields
     /// when the user provides them via CLI flags.
-    pub fn with_overrides(mut self, model: Option<String>, ollama_url: Option<String>) -> Self {
+    pub fn with_overrides(
+        mut self,
+        model: Option<String>,
+        ollama_url: Option<String>,
+        skill: Option<String>,
+    ) -> Self {
         if let Some(m) = model {
             self.ollama.model = m;
         }
         if let Some(u) = ollama_url {
             self.ollama.url = u;
+        }
+        if let Some(s) = skill {
+            self.skill.name = s;
         }
         self
     }
@@ -293,11 +406,14 @@ mod tests {
             },
             agent: AgentConfig::default(),
             tools: ToolsConfig::default(),
+            skill: SkillConfig::default(),
+            project: ProjectConfig::default(),
         };
 
         let overridden = config.with_overrides(
             Some("custom-model".to_string()),
             Some("http://remote:11434".to_string()),
+            None,
         );
 
         assert_eq!(overridden.ollama.model, "custom-model");
