@@ -23,7 +23,7 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use serde_json::Value;
 use tracing::{debug, info, warn};
-use walkdir::WalkDir;
+use walkdir::{DirEntry, WalkDir};
 
 use crate::tools::traits::{Tool, ToolResult};
 
@@ -388,7 +388,9 @@ impl Tool for FileSearchTool {
     fn description(&self) -> &str {
         "Search for a regex pattern in files under a directory (like grep -rn). Returns matching \
          lines with file paths and line numbers. Use this to find function definitions, usages, \
-         error messages, TODO comments, etc."
+         error messages, TODO comments, etc. \
+         Note: build artifact directories (target/, node_modules/, dist/, build/) and hidden \
+         directories (.git/, etc.) are automatically skipped."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -471,9 +473,15 @@ impl Tool for FileSearchTool {
             let max_results = self.config.max_search_results;
 
             // Walk the directory tree, searching each text file.
+            //
+            // `filter_entry` prunes entire subtrees before descending — this is
+            // what prevents the tool from grinding through `target/` (tens of
+            // thousands of Rust build artefacts) or `node_modules/`. Without
+            // this, searching a Rust workspace can hang for 30+ seconds.
             for entry in WalkDir::new(&resolved_dir)
                 .follow_links(false)
                 .into_iter()
+                .filter_entry(|e| !is_excluded_search_dir(e))
                 .filter_map(|e| e.ok())
             {
                 if matches.len() >= max_results {
@@ -569,6 +577,35 @@ impl Tool for FileSearchTool {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Returns `true` for directory entries that should be entirely skipped
+/// during a file search walk.
+///
+/// Using this with `WalkDir::filter_entry` prunes the subtree *before*
+/// descending, which is what makes the difference between an instant search
+/// and a 30-second hang when the workspace contains a Rust `target/` directory
+/// or a JavaScript `node_modules/`.
+///
+/// # What's excluded
+/// - Hidden directories (leading `.`): `.git/`, `.cargo/`, `.vscode/`, etc.
+/// - Rust build output: `target/`
+/// - JS/TS package trees: `node_modules/`
+/// - Python bytecode: `__pycache__/`
+/// - Common frontend build outputs: `dist/`, `build/`, `.next/`, `.nuxt/`
+fn is_excluded_search_dir(entry: &DirEntry) -> bool {
+    // depth == 0 is the root of the walk — always include it regardless of name.
+    // filter_entry is called on the root too, and on Windows TempDir creates
+    // names like `.tmpXXXXXX` which would otherwise match our dot check.
+    if entry.depth() == 0 || !entry.file_type().is_dir() {
+        return false;
+    }
+    let name = entry.file_name().to_str().unwrap_or("");
+    name.starts_with('.')
+        || matches!(
+            name,
+            "target" | "node_modules" | "__pycache__" | "dist" | "build" | ".next" | ".nuxt"
+        )
+}
 
 /// Very simple glob matching: supports `*` as a wildcard prefix/suffix.
 ///
@@ -889,5 +926,64 @@ mod tests {
     fn test_glob_exact_match() {
         assert!(simple_glob_match("Makefile", "Makefile"));
         assert!(!simple_glob_match("Makefile", "makefile2"));
+    }
+
+    // -----------------------------------------------------------------------
+    // is_excluded_search_dir
+    // -----------------------------------------------------------------------
+
+    /// Verify that file_search skips `target/` and doesn't return results from it.
+    #[tokio::test]
+    async fn test_file_search_skips_target_dir() {
+        let dir = TempDir::new().unwrap();
+
+        // A file that should be found.
+        std::fs::write(dir.path().join("src.rs"), "pub fn hello() {}").unwrap();
+
+        // A file inside `target/` that should NOT be found.
+        let target_dir = dir.path().join("target").join("debug");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join("artifact.rs"), "pub fn hello() {}").unwrap();
+
+        let tool = FileSearchTool::new(test_config(dir.path()));
+        let result = tool
+            .execute(serde_json::json!({ "pattern": "hello", "path": "." }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(
+            result.content.contains("src.rs"),
+            "Expected src.rs in results"
+        );
+        assert!(
+            !result.content.contains("artifact.rs"),
+            "target/ contents should be excluded from search results"
+        );
+    }
+
+    /// Verify that file_search skips hidden directories like `.git/`.
+    #[tokio::test]
+    async fn test_file_search_skips_hidden_dirs() {
+        let dir = TempDir::new().unwrap();
+
+        std::fs::write(dir.path().join("readme.txt"), "findme").unwrap();
+
+        let git_dir = dir.path().join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("config"), "findme").unwrap();
+
+        let tool = FileSearchTool::new(test_config(dir.path()));
+        let result = tool
+            .execute(serde_json::json!({ "pattern": "findme", "path": "." }))
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("readme.txt"));
+        assert!(
+            !result.content.contains(".git"),
+            ".git/ contents should be excluded from search results"
+        );
     }
 }
