@@ -18,12 +18,33 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::Path;
 
+/// Which LLM backend ragent should use.
+///
+/// Select with `backend = "openai"` in `config/default.toml`, or override
+/// per-run with `--backend openai`. The `openai` variant works with any
+/// OpenAI-compatible server: LM Studio, Jan, a remote OpenAI key, etc.
+#[derive(Debug, Deserialize, Clone, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendType {
+    #[default]
+    Ollama,
+    OpenAi,
+}
+
 /// Top-level application configuration.
 ///
 /// Mirrors the structure of `config/default.toml`.
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
+    /// Which LLM backend to use. Defaults to `"ollama"`.
+    #[serde(default)]
+    pub backend: BackendType,
+
     pub ollama: OllamaConfig,
+
+    /// OpenAI-compatible backend (LM Studio, OpenAI, etc.).
+    #[serde(default)]
+    pub openai: OpenAiConfig,
 
     /// Agent loop configuration. Optional in the TOML — uses defaults if absent.
     #[serde(default)]
@@ -75,6 +96,58 @@ pub struct OllamaConfig {
 
 fn default_request_timeout_secs() -> u64 {
     600 // 10 minutes — generous for CPU inference with large contexts
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible backend configuration
+// ---------------------------------------------------------------------------
+
+/// Configuration for any OpenAI-compatible LLM backend.
+///
+/// Works with LM Studio (`http://localhost:1234/v1`), Jan, a remote OpenAI
+/// API key, or any other server that speaks the `/v1/chat/completions` format.
+#[derive(Debug, Deserialize, Clone)]
+pub struct OpenAiConfig {
+    /// Base URL of the OpenAI-compatible API, WITHOUT a trailing slash.
+    /// LM Studio default: `http://localhost:1234/v1`
+    #[serde(default = "default_openai_url")]
+    pub url: String,
+
+    /// Model identifier as shown in the server's model list.
+    /// In LM Studio this is the filename/path shown in the model loader.
+    #[serde(default = "default_openai_model")]
+    pub model: String,
+
+    /// API key. Optional for local servers (LM Studio accepts any value).
+    /// Required for remote OpenAI / Anthropic / etc.
+    pub api_key: Option<String>,
+
+    /// LLM temperature (0.0 = deterministic, 1.0 = creative).
+    pub temperature: Option<f32>,
+
+    /// Request timeout in seconds (same semantics as `OllamaConfig::request_timeout_secs`).
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+}
+
+fn default_openai_url() -> String {
+    "http://localhost:1234/v1".to_string()
+}
+
+fn default_openai_model() -> String {
+    "local-model".to_string()
+}
+
+impl Default for OpenAiConfig {
+    fn default() -> Self {
+        Self {
+            url: default_openai_url(),
+            model: default_openai_model(),
+            api_key: None,
+            temperature: None,
+            request_timeout_secs: default_request_timeout_secs(),
+        }
+    }
 }
 
 /// Configuration for the agent loop.
@@ -415,6 +488,7 @@ mod tests {
     #[test]
     fn test_config_overrides() {
         let config = AppConfig {
+            backend: BackendType::default(),
             ollama: OllamaConfig {
                 url: "http://localhost:11434".to_string(),
                 model: "default-model".to_string(),
@@ -422,6 +496,7 @@ mod tests {
                 context_window: None,
                 request_timeout_secs: default_request_timeout_secs(),
             },
+            openai: OpenAiConfig::default(),
             agent: AgentConfig::default(),
             tools: ToolsConfig::default(),
             skill: SkillConfig::default(),

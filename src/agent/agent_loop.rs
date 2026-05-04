@@ -359,6 +359,46 @@ impl<B: LlmBackend> AgentLoop<B> {
                         }
                     }
 
+                    // --- Budget warning ---
+                    //
+                    // When the agent is close to the iteration limit, inject a
+                    // message nudging the model to stop exploring and synthesise
+                    // a final answer. Without this, the agent hits the hard stop
+                    // and returns nothing useful, even though it may have already
+                    // gathered enough information to answer.
+                    //
+                    // We fire this exactly once: when BUDGET_WARN_AT iterations
+                    // remain. That gives the model one clean chance to wrap up,
+                    // plus a couple of safety iterations if it calls one more tool.
+                    //
+                    // Why Role::User? The model is trained to respond to user
+                    // instructions. A user message is the most reliable way to
+                    // interrupt an exploration loop and elicit a text response.
+                    const BUDGET_WARN_AT: usize = 3;
+                    let remaining = self.max_iterations.saturating_sub(iteration);
+                    if remaining == BUDGET_WARN_AT {
+                        warn!(
+                            iteration = iteration,
+                            max_iterations = self.max_iterations,
+                            "Approaching iteration limit — injecting budget warning"
+                        );
+                        self.conversation.push(Message {
+                            role: Role::User,
+                            content: format!(
+                                "IMPORTANT: You have used {iteration} of your {max} allowed \
+                                 steps and only {remaining} remain. Stop calling tools \
+                                 immediately and provide your complete final answer right \
+                                 now, based on everything you have gathered so far. \
+                                 Do not call any more tools.",
+                                iteration = iteration,
+                                max = self.max_iterations,
+                                remaining = remaining,
+                            ),
+                            tool_calls: None,
+                            tool_call_id: None,
+                        });
+                    }
+
                     // Continue the loop — send the tool results back to the LLM.
                     continue;
                 }

@@ -1,6 +1,10 @@
 # ragent default configuration
 # Override these via CLI flags or a project-local ragent.toml
 
+# Which LLM backend to use: "ollama" (default) or "openai".
+# Switch to "openai" to use LM Studio (with GPU/NPU via DirectML) or a remote OpenAI key.
+backend = "openai"
+
 [ollama]
 # URL where Ollama is running
 url = "http://localhost:11434"
@@ -24,7 +28,9 @@ model = "qwen2.5-coder:3b"
 [agent]
 # Maximum tool-call loop iterations before the agent stops.
 # This is a safety limit to prevent infinite loops if the LLM keeps requesting tools.
-max_iterations = 20
+max_iterations = 30
+# The agent injects a "please wrap up" nudge 3 iterations before this limit,
+# giving the model a chance to synthesise its findings rather than hard-stopping.
 # System prompt that defines the agent's behaviour.
 system_prompt = "You are a helpful AI assistant running locally via ragent. You have access to tools for reading files, writing files, searching files, and executing shell commands. Use them when appropriate to accomplish tasks. Be concise and helpful."
 
@@ -65,6 +71,24 @@ name = "code"
 # of the project structure, reducing the need to explore manually.
 auto_detect = true
 # Maximum directory depth for the file tree (0 = root only, 4 = default).
-max_tree_depth = 4
+max_tree_depth = 2
 # Maximum bytes to include from each key file (Cargo.toml, README, etc.).
-max_key_file_bytes = 16384  # 16 KB
+max_key_file_bytes = 2048  # 16 KB
+
+# ---------------------------------------------------------------------------
+# OpenAI-compatible backend (LM Studio, Jan, remote OpenAI, etc.)
+# Activate with: backend = "openai" at the top of this file.
+# ---------------------------------------------------------------------------
+
+[openai]
+# Base URL of the OpenAI-compatible API server (no trailing slash).
+# LM Studio default — start the server under Developer → Local Server.
+url = "http://localhost:1234/v1"
+# Model name exactly as shown in LM Studio's loaded-model dropdown.
+# e.g. "qwen2.5-coder-3b-instruct" or whatever your loaded model is called.
+model = "qwen3.5-4b"
+# model = "google/gemma-4-e2b"
+# API key: LM Studio accepts any non-empty string; leave unset for local use.
+# api_key = "lm-studio"
+# Same timeout semantics as [ollama] request_timeout_secs.
+# request_timeout_secs = 600

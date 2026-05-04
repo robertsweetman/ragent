@@ -25,8 +25,10 @@ use tracing::{error, info, warn};
 
 use ragent::agent::agent_loop::AgentLoop;
 use ragent::agent::{ProjectContext, Skill};
-use ragent::config::AppConfig;
+use ragent::config::{AppConfig, BackendType};
+use ragent::llm::LlmBackend;
 use ragent::llm::ollama::{OllamaBackend, OllamaError};
+use ragent::llm::openai::OpenAiBackend;
 use ragent::tools::ToolRegistry;
 use ragent::tools::file_ops::{FileReadTool, FileSearchTool, FileToolsConfig, FileWriteTool};
 use ragent::tools::file_patch::FilePatchTool;
@@ -266,44 +268,117 @@ async fn main() -> Result<()> {
     // Build the final system prompt: skill base + optional project context.
     let system_prompt = skill.build_system_prompt(project_context_str.as_deref());
 
-    // --- Build the agent loop ---
+    // --- Build the agent loop and start REPL ---
     //
-    // Builder pattern: `with_token_callback` and `with_tool_callback` each take
-    // `self` by value and return `Self`, so they can be chained. The closures are
-    // non-capturing (they only call std::io), so they satisfy `Send + Sync + 'static`.
-    let agent = AgentLoop::new(
-        backend,
-        registry,
-        &system_prompt,
-        config.agent.max_iterations,
-    )
-    .with_token_callback(|token| {
-        print!("{token}");
-        let _ = std::io::stdout().flush();
-    })
-    .with_tool_callback(|name, args| {
-        let preview = format_tool_args_preview(args);
-        println!(
-            "\n  {} {}{}{}",
-            "⚙".yellow(),
-            name.cyan().bold(),
-            "(".dimmed(),
-            format!("{})", preview).dimmed(),
-        );
-        let _ = std::io::stdout().flush();
-    });
+    // We branch on `config.backend` here. Both arms build an `AgentLoop<B>` for
+    // their respective backend type and call the generic `run_repl`. The factory
+    // closure is passed through so the `/workspace` command can rebuild the agent
+    // for a new directory without knowing which backend type is in use.
+    match config.backend {
+        BackendType::Ollama => {
+            let agent = AgentLoop::new(
+                backend,
+                registry,
+                &system_prompt,
+                config.agent.max_iterations,
+            )
+            .with_token_callback(|token| {
+                print!("{token}");
+                let _ = std::io::stdout().flush();
+            })
+            .with_tool_callback(|name, args| {
+                let preview = format_tool_args_preview(args);
+                println!(
+                    "\n  {} {}{}{}",
+                    "⚙".yellow(),
+                    name.cyan().bold(),
+                    "(".dimmed(),
+                    format!("{})", preview).dimmed(),
+                );
+                let _ = std::io::stdout().flush();
+            });
 
-    // --- Start REPL ---
+            print_banner(
+                env!("CARGO_PKG_VERSION"),
+                &config.ollama.model,
+                "Ollama",
+                &skill.name,
+                &workspace,
+            );
+
+            run_repl(
+                agent,
+                |c: &AppConfig| OllamaBackend::new(c.ollama.clone()),
+                system_prompt,
+                config,
+                skill,
+            )
+            .await
+        }
+
+        BackendType::OpenAi => {
+            let openai_backend = OpenAiBackend::new(config.openai.clone());
+
+            if let Err(e) = openai_backend.check_connection().await {
+                eprintln!("\n{}", format!("Error: {e:#}").red().bold());
+                std::process::exit(1);
+            }
+
+            let agent = AgentLoop::new(
+                openai_backend,
+                registry,
+                &system_prompt,
+                config.agent.max_iterations,
+            )
+            .with_token_callback(|token| {
+                print!("{token}");
+                let _ = std::io::stdout().flush();
+            })
+            .with_tool_callback(|name, args| {
+                let preview = format_tool_args_preview(args);
+                println!(
+                    "\n  {} {}{}{}",
+                    "⚙".yellow(),
+                    name.cyan().bold(),
+                    "(".dimmed(),
+                    format!("{})", preview).dimmed(),
+                );
+                let _ = std::io::stdout().flush();
+            });
+
+            print_banner(
+                env!("CARGO_PKG_VERSION"),
+                &config.openai.model,
+                "OpenAI-compatible",
+                &skill.name,
+                &workspace,
+            );
+
+            run_repl(
+                agent,
+                |c: &AppConfig| OpenAiBackend::new(c.openai.clone()),
+                system_prompt,
+                config,
+                skill,
+            )
+            .await
+        }
+    }
+}
+
+/// Print the startup banner with backend/model info.
+fn print_banner(
+    version: &str,
+    model: &str,
+    backend_name: &str,
+    skill: &str,
+    workspace: &std::path::Path,
+) {
     println!(
         "{}",
-        format!(
-            "ragent v{} -- chatting with {} via Ollama  [skill: {}]",
-            env!("CARGO_PKG_VERSION"),
-            config.ollama.model,
-            skill.name
-        )
-        .green()
-        .bold()
+        format!("ragent v{version} -- {model} via {backend_name}  [skill: {skill}]")
+            .green()
+            .bold()
     );
     println!("{}", format!("Workspace: {}", workspace.display()).dimmed());
     println!(
@@ -315,8 +390,6 @@ async fn main() -> Result<()> {
         "Type your message and press Enter. Commands: /clear, /quit, /help".dimmed()
     );
     println!("{}", "-".repeat(60).dimmed());
-
-    run_repl(agent, system_prompt, config, skill).await
 }
 
 /// Build the tool registry, wiring config into each tool.
@@ -515,8 +588,9 @@ async fn warn_if_tools_unsupported(model: &str, backend: &OllamaBackend) {
 /// Takes ownership of `config`, `skill`, and `system_prompt` so the
 /// `/workspace` command can mutate them in-place to switch projects
 /// without restarting the process.
-async fn run_repl(
-    mut agent: AgentLoop<OllamaBackend>,
+async fn run_repl<B: LlmBackend>(
+    mut agent: AgentLoop<B>,
+    make_backend: impl Fn(&AppConfig) -> B,
     mut system_prompt: String,
     mut config: AppConfig,
     skill: Skill,
@@ -672,7 +746,7 @@ async fn run_repl(
                 // (system prompt only), so the user gets a blank slate relative
                 // to the new project.
                 agent = AgentLoop::new(
-                    OllamaBackend::new(config.ollama.clone()),
+                    make_backend(&config),
                     new_registry,
                     &system_prompt,
                     config.agent.max_iterations,
