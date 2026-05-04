@@ -68,6 +68,14 @@ pub struct AgentLoop<B: LlmBackend> {
     /// Each round-trip = one LLM call that might produce tool calls.
     /// This prevents infinite loops if the LLM keeps calling tools endlessly.
     max_iterations: usize,
+
+    /// Called with each text token as the LLM streams its response.
+    /// `None` means no streaming output (silent mode, used by tests).
+    on_token: Option<Box<dyn Fn(&str) + Send + Sync>>,
+
+    /// Called with (tool_name, args) immediately before a tool is executed.
+    /// Lets the caller display a live "⚙ tool_name(…)" line.
+    on_tool: Option<Box<dyn Fn(&str, &serde_json::Value) + Send + Sync>>,
 }
 
 impl<B: LlmBackend> AgentLoop<B> {
@@ -95,7 +103,38 @@ impl<B: LlmBackend> AgentLoop<B> {
             registry,
             conversation: Conversation::with_system_prompt(system_prompt),
             max_iterations,
+            on_token: None,
+            on_tool: None,
         }
+    }
+
+    /// Attach a callback that receives streamed LLM tokens as they arrive.
+    ///
+    /// # Pattern: Builder / method chaining
+    /// Returns `self` by value so you can write:
+    /// ```ignore
+    /// let agent = AgentLoop::new(...).with_token_callback(|t| print!("{t}"));
+    /// ```
+    /// The `'static` bound is required because the callback is stored on the heap
+    /// (`Box<dyn Fn>`), so the compiler must know it outlives any stack frame.
+    pub fn with_token_callback<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&str) + Send + Sync + 'static,
+    {
+        self.on_token = Some(Box::new(f));
+        self
+    }
+
+    /// Attach a callback invoked just before each tool call with `(tool_name, args)`.
+    ///
+    /// Use this to print a "⚙ shell_exec(…)" line so the user can see what the
+    /// agent is doing without having to enable debug logging.
+    pub fn with_tool_callback<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&str, &serde_json::Value) + Send + Sync + 'static,
+    {
+        self.on_tool = Some(Box::new(f));
+        self
     }
 
     /// Process a user message through the full agent loop.
@@ -129,11 +168,13 @@ impl<B: LlmBackend> AgentLoop<B> {
             info!(iteration = iteration, "Agent loop iteration");
 
             // Call the LLM with the full conversation + tool definitions.
+            // Pass the stored token callback so OllamaBackend can stream tokens.
             let response = self
                 .backend
                 .chat(
                     self.conversation.messages(),
                     if has_tools { &tool_defs } else { &[] },
+                    self.on_token.as_deref().map(|f| f as &dyn Fn(&str)),
                 )
                 .await
                 .context("LLM chat request failed")?;
@@ -186,6 +227,13 @@ impl<B: LlmBackend> AgentLoop<B> {
                             args = %serde_json::to_string(tool_args).unwrap_or_default(),
                             "Executing tool"
                         );
+
+                        // Notify the observer that we're about to run a tool.
+                        // This lets the REPL print a live "⚙ tool_name(…)" line
+                        // without the agent loop knowing anything about the UI.
+                        if let Some(on_tool) = &self.on_tool {
+                            on_tool(tool_name, tool_args);
+                        }
 
                         let tool_result: crate::tools::ToolResult =
                             match self.registry.get(tool_name) {
@@ -660,7 +708,12 @@ mod tests {
 
     #[allow(async_fn_in_trait)]
     impl LlmBackend for MockBackend {
-        async fn chat(&self, _messages: &[Message], _tools: &[ToolDef]) -> Result<Message> {
+        async fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDef],
+            _on_token: Option<&dyn Fn(&str)>,
+        ) -> Result<Message> {
             let mut queue = self.responses.lock().unwrap();
             if queue.is_empty() {
                 anyhow::bail!("MockBackend: no more responses in queue");

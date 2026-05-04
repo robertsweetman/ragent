@@ -4,12 +4,22 @@
 [ollama]
 # URL where Ollama is running
 url = "http://localhost:11434"
-# Default model to use (must be pulled in Ollama first)
-model = "qwen2.5-coder:7b"
+# Default model to use (must be pulled in Ollama first).
+# Smaller models respond MUCH faster on CPU:
+#   qwen2.5-coder:1.5b  -- very fast, good for quick edits
+#   qwen2.5-coder:3b    -- good balance of speed and quality (recommended for CPU)
+#   qwen2.5-coder:7b    -- better quality but slow to prefill on CPU
+model = "qwen2.5-coder:3b"
 # LLM temperature (0.0 = deterministic, 1.0 = creative). Optional.
 # temperature = 0.7
 # Context window size in tokens. Optional — uses model default if unset.
 # context_window = 4096
+# How long (seconds) to wait for Ollama before giving up.
+# On CPU, the model must process ALL input tokens before generating its first
+# output token (the "prefill" phase). With a large project-context system prompt
+# this can take several minutes for a 7B model. Increase this value if you see
+# "operation timed out" errors. Default: 600 (10 minutes).
+# request_timeout_secs = 600
 
 [agent]
 # Maximum tool-call loop iterations before the agent stops.

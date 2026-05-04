@@ -267,12 +267,31 @@ async fn main() -> Result<()> {
     let system_prompt = skill.build_system_prompt(project_context_str.as_deref());
 
     // --- Build the agent loop ---
+    //
+    // Builder pattern: `with_token_callback` and `with_tool_callback` each take
+    // `self` by value and return `Self`, so they can be chained. The closures are
+    // non-capturing (they only call std::io), so they satisfy `Send + Sync + 'static`.
     let agent = AgentLoop::new(
         backend,
         registry,
         &system_prompt,
         config.agent.max_iterations,
-    );
+    )
+    .with_token_callback(|token| {
+        print!("{token}");
+        let _ = std::io::stdout().flush();
+    })
+    .with_tool_callback(|name, args| {
+        let preview = format_tool_args_preview(args);
+        println!(
+            "\n  {} {}{}{}",
+            "⚙".yellow(),
+            name.cyan().bold(),
+            "(".dimmed(),
+            format!("{})", preview).dimmed(),
+        );
+        let _ = std::io::stdout().flush();
+    });
 
     // --- Start REPL ---
     println!(
@@ -333,6 +352,43 @@ fn build_tool_registry(config: &AppConfig) -> ToolRegistry {
     info!(tools = ?registry.names(), "Tool registry built");
 
     registry
+}
+
+/// Format tool arguments as a compact preview string for the REPL.
+///
+/// Truncates long string values so the tool-call announcement line stays
+/// readable on a single terminal line.
+///
+/// Example output: `path="src/main.rs", pattern="fn main"`
+fn format_tool_args_preview(args: &serde_json::Value) -> String {
+    let Some(obj) = args.as_object() else {
+        return args.to_string();
+    };
+    let pairs: Vec<String> = obj
+        .iter()
+        .map(|(k, v)| {
+            let val = match v {
+                serde_json::Value::String(s) => {
+                    let truncated = if s.chars().count() > 60 {
+                        format!("{}\u{2026}", s.chars().take(60).collect::<String>())
+                    } else {
+                        s.clone()
+                    };
+                    format!("\"{}\"", truncated)
+                }
+                other => {
+                    let s = other.to_string();
+                    if s.len() > 60 {
+                        format!("{}\u{2026}", &s[..60])
+                    } else {
+                        s
+                    }
+                }
+            };
+            format!("{}={}", k, val)
+        })
+        .collect();
+    pairs.join(", ")
 }
 
 /// Set up tracing/logging with the specified level.
@@ -620,7 +676,22 @@ async fn run_repl(
                     new_registry,
                     &system_prompt,
                     config.agent.max_iterations,
-                );
+                )
+                .with_token_callback(|token| {
+                    print!("{token}");
+                    let _ = std::io::stdout().flush();
+                })
+                .with_tool_callback(|name, args| {
+                    let preview = format_tool_args_preview(args);
+                    println!(
+                        "\n  {} {}{}{}",
+                        "⚙".yellow(),
+                        name.cyan().bold(),
+                        "(".dimmed(),
+                        format!("{})", preview).dimmed(),
+                    );
+                    let _ = std::io::stdout().flush();
+                });
 
                 println!(
                     "{}",
@@ -647,8 +718,10 @@ async fn run_repl(
         io::stdout().flush()?;
 
         match agent.process_message(input).await {
-            Ok(response) => {
-                println!("{}", response);
+            Ok(_response) => {
+                // Tokens were already streamed to stdout character-by-character
+                // via the `on_token` callback; just move to a new line.
+                println!();
             }
             Err(e) => {
                 // Check if this is the "model doesn't support tools" error.
@@ -690,7 +763,7 @@ async fn run_repl(
                     std::process::exit(1);
                 }
 
-                eprintln!("{}", format!("Error: {e}").red());
+                eprintln!("{}", format!("Error: {e:#}").red());
                 warn!(error = %e, "Agent loop failed");
             }
         }

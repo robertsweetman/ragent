@@ -40,13 +40,20 @@ pub trait LlmBackend: Send + Sync {
     ///
     /// # Arguments
     /// * `messages` — The conversation history (system + user + assistant messages).
-    /// * `tools` — Tool definitions the LLM can choose to call. Pass `&[]` for Phase 1 (no tools).
+    /// * `tools` — Tool definitions the LLM can choose to call. Pass `&[]` for no tools.
+    /// * `on_token` — Optional callback invoked with each text token as it streams in.
+    ///   When `Some`, the backend switches to streaming mode (NDJSON). When `None`,
+    ///   the backend uses a single blocking response (keeps existing test behaviour).
     ///
     /// # Returns
-    /// The assistant's response as a `Message`. May contain `tool_calls` if the LLM
-    /// decided to use a tool (Phase 2+).
-    async fn chat(&self, messages: &[Message], tools: &[ToolDef]) -> Result<Message>;
+    /// The assistant's full response as a `Message` after all tokens/tool-calls arrive.
+    async fn chat(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+        on_token: Option<&dyn Fn(&str)>,
+    ) -> Result<Message>;
 
-    // Streaming will be added later:
-    // async fn chat_stream(...) -> Result<impl Stream<Item = ...>>;
+    // Streaming is handled via the `on_token` callback on `chat` rather than
+    // a separate method, keeping the trait surface small and the call sites simple.
 }

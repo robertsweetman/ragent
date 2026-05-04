@@ -48,7 +48,7 @@ pub struct OllamaConfig {
     /// URL where Ollama is running (e.g. `http://localhost:11434`).
     pub url: String,
 
-    /// Model name to use (must be pulled in Ollama, e.g. `deepseek-r1:8b`).
+    /// Model name to use (must be pulled in Ollama, e.g. `qwen2.5-coder:7b`).
     pub model: String,
 
     /// LLM temperature (0.0 = deterministic, 1.0 = creative).
@@ -58,6 +58,23 @@ pub struct OllamaConfig {
     /// Context window size in tokens.
     /// `None` means use the model's default.
     pub context_window: Option<u32>,
+
+    /// How long (in seconds) to wait for Ollama to respond before giving up.
+    ///
+    /// This covers the full round-trip: connecting + sending the request +
+    /// waiting for Ollama to finish the **prefill** phase (processing all input
+    /// tokens) and return the first response byte.
+    ///
+    /// On CPU, prefill time grows with model size × context length. A 7B model
+    /// with a large project-context system prompt can easily take several minutes
+    /// before generating its first token. Increase this if you see
+    /// "operation timed out" errors. Defaults to 600 seconds (10 minutes).
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+}
+
+fn default_request_timeout_secs() -> u64 {
+    600 // 10 minutes — generous for CPU inference with large contexts
 }
 
 /// Configuration for the agent loop.
@@ -403,6 +420,7 @@ mod tests {
                 model: "default-model".to_string(),
                 temperature: None,
                 context_window: None,
+                request_timeout_secs: default_request_timeout_secs(),
             },
             agent: AgentConfig::default(),
             tools: ToolsConfig::default(),
