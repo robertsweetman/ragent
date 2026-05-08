@@ -3,7 +3,7 @@
 
 # Which LLM backend to use: "ollama" (default) or "openai".
 # Switch to "openai" to use LM Studio (with GPU/NPU via DirectML) or a remote OpenAI key.
-backend = "openai"
+backend = "ollama"
 
 [ollama]
 # URL where Ollama is running
